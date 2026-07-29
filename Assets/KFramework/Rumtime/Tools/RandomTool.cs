@@ -6,7 +6,6 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
 
