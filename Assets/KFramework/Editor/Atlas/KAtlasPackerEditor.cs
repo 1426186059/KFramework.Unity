@@ -11,31 +11,28 @@ namespace KFramework.Editor.Atlas
     /// <summary>
     /// 类似 TexturePacker 的图集打包插件。
     ///
-    /// - <see cref="Export_K_Atlas"/>       : 选中文件夹，把该文件夹（含所有子文件夹）下的所有小图
-    ///                                         打包为一张大图，返回打包结果（不写文件）。
-    /// - <see cref="UnitySprite_Export_K_Atlas(string)"/> : 调用上面的打包方法，并把"图集图片(.png)"与
-    ///                                         "json 描述文件(.json)"输出到磁盘，json 通过 JsonTool 序列化。
-    /// - <see cref="UnitySprite_Export_K_Atlas(Texture2D)"/> : 针对已有的 Unity（Multiple Sprite）纹理，
-    ///                                         直接导出其图集 png + json。
+    /// - <see cref="Export_K_Atlas"/>                : 选中文件夹（含所有子文件夹），把所有小图打包为一张大图，返回结果（不写文件）。
+    /// - <see cref="UnitySprite_Export_K_Atlas(string)"/> : 调用上面的打包方法，输出"图集 png" + "json"（json 通过 JsonTool 序列化）。
+    /// - <see cref="UnitySprite_Export_K_Atlas(Texture2D)"/> : 针对已有的 Unity（Multiple Sprite）纹理，直接导出图集 png + json。
     ///
-    /// 输出兼容 TexturePacker 的 JSON（hash / array）格式，Y 轴已翻转，pivot 默认为中心 (0.5,0.5)。
+    /// 输出兼容 TexturePacker 的 JSON（hash / array）格式，Y 轴已翻转，pivot 默认中心 (0.5,0.5)。
+    /// 装箱复用同目录的 <see cref="MaxRectsPacker"/>（BSSF 最适短边优先）。
     /// </summary>
     public static class KAtlasPacker
     {
         // 是否输出 hash（frames 为命名对象，默认）或 array（frames 为数组）格式
         private static bool s_UseArrayFormat;
 
-        // 图集最大边长（超过则打包失败）。可按需调大。
+        // 图集最大边长。超过则打包失败。
         private const int MaxAtlasSize = 4096;
 
-        // 可选：图集内 sprite 之间的留白，避免采样渗色。默认 0（严格对齐）。
-        private const int Padding = 0;
+        // 图集内 sprite 之间的留白（像素），避免采样渗色。默认 1。
+        private const int Padding = 1;
 
         #region 公共 API
 
         /// <summary>
-        /// 把 folderPath 下（递归）的所有小图打包为一张大图。
-        /// 返回包含合成好的大图与各 sprite 位置的 <see cref="AtlasResult"/>。
+        /// 把 folderPath 下（递归）的所有小图打包为一张大图。返回包含合成大图与每帧位置的 <see cref="AtlasResult"/>。
         /// </summary>
         public static AtlasResult Export_K_Atlas(string folderPath)
         {
@@ -48,21 +45,19 @@ namespace KFramework.Editor.Atlas
             // 1. 收集文件夹下所有图片纹理
             var guids = AssetDatabase.FindAssets("t:Texture2D", new[] { folderPath });
             var entries = new List<ImageEntry>();
+            var seen = new HashSet<string>();
             foreach (var guid in guids)
             {
                 string path = AssetDatabase.GUIDToAssetPath(guid);
                 if (string.IsNullOrEmpty(path)) continue;
                 if (!IsSupportedImage(path)) continue;
+                string name = Path.GetFileNameWithoutExtension(path);
+                // 同名去重（不同子目录同名小图仅取第一个，避免图集 key 冲突）
+                if (!seen.Add(name)) continue;
 
                 var tex = LoadSourceTexture(path);
                 if (tex == null) continue;
-                entries.Add(new ImageEntry
-                {
-                    name = Path.GetFileNameWithoutExtension(path),
-                    texture = tex,
-                    width = tex.width,
-                    height = tex.height
-                });
+                entries.Add(new ImageEntry { name = name, texture = tex, width = tex.width, height = tex.height });
             }
 
             if (entries.Count == 0)
@@ -74,8 +69,8 @@ namespace KFramework.Editor.Atlas
             // 2. 按面积从大到小排序，提升装箱率
             entries.Sort((a, b) => b.width * b.height - a.width * a.height);
 
-            // 3. 从小到大尝试不同图集尺寸，找到能放下全部图的最小尺寸
-            int[] sizes = { 512, 1024, 2048, 4096 };
+            // 3. 从小到大尝试候选尺寸，取能放下全部图的最小尺寸
+            int[] sizes = { 256, 512, 1024, 2048, 4096 };
             foreach (int size in sizes)
             {
                 if (size > MaxAtlasSize) break;
@@ -86,12 +81,11 @@ namespace KFramework.Editor.Atlas
                 {
                     if (packer.Insert(e.width + Padding, e.height + Padding, out var r))
                     {
-                        // 去掉留白，记录真实图像位置
                         placements.Add(new Placement
                         {
                             entry = e,
-                            x = r.x + Padding / 2,
-                            y = r.y + Padding / 2,
+                            x = r.x,
+                            y = r.y,
                             w = e.width,
                             h = e.height
                         });
@@ -112,8 +106,10 @@ namespace KFramework.Editor.Atlas
             }
 
             Debug.LogError(string.Format(
-                "[KAtlasPacker] 无法在 {0}x{0} 内放下全部 {1} 张小图（可能存在超过最大尺寸的图）。",
+                "[KAtlasPacker] 无法在 {0}x{0} 内放下全部 {1} 张小图（存在超过最大尺寸的图？）。",
                 MaxAtlasSize, entries.Count));
+            // 释放已加载纹理，避免泄漏
+            foreach (var e in entries) Object.DestroyImmediate(e.texture);
             return null;
         }
 
@@ -126,8 +122,7 @@ namespace KFramework.Editor.Atlas
             if (result == null) return;
 
             string folderName = Path.GetFileName(folderPath.TrimEnd('/', '\\'));
-            if (string.IsNullOrEmpty(folderName))
-                folderName = "KAtlas";
+            if (string.IsNullOrEmpty(folderName)) folderName = "KAtlas";
             string atlasName = folderName + "_atlas";
 
             string pngPath = Path.Combine(folderPath, atlasName + ".png").Replace('\\', '/');
@@ -156,9 +151,7 @@ namespace KFramework.Editor.Atlas
 
             var importer = AssetImporter.GetAtPath(texPath) as TextureImporter;
             if (importer != null && importer.spriteImportMode != SpriteImportMode.Multiple)
-            {
-                Debug.LogWarning("[KAtlasPacker] 该纹理不是 Multiple Sprite 模式，仍按整图导出。");
-            }
+                Debug.LogWarning("[KAtlasPacker] 该纹理不是 Multiple Sprite 模式，按整图导出。");
 
             int texW = texture.width;
             int texH = texture.height;
@@ -170,7 +163,7 @@ namespace KFramework.Editor.Atlas
                 sprites.Sort((a, b) => string.Compare(a.name, b.name, System.StringComparison.Ordinal));
                 foreach (var sprite in sprites)
                 {
-                    // textureRect 直接位于实际导入纹理像素空间，已含 Max Size 缩放校正
+                    // textureRect 位于实际导入纹理像素空间，已含 Max Size 缩放校正
                     Rect r = sprite.textureRect;
                     int x = Mathf.RoundToInt(r.x);
                     int y = Mathf.RoundToInt(r.y);
@@ -178,8 +171,7 @@ namespace KFramework.Editor.Atlas
                     int h = Mathf.RoundToInt(r.height);
                     int tpY = texH - y - h; // TexturePacker Y 轴朝上
 
-                    frames.Add(MakeFrame(sprite.name, x, tpY, w, h, w, h,
-                        sprite.pivot.x, sprite.pivot.y));
+                    frames.Add(MakeFrame(sprite.name, x, tpY, w, h, w, h, sprite.pivot.x, sprite.pivot.y));
                 }
             }
             else
@@ -275,8 +267,7 @@ namespace KFramework.Editor.Atlas
         }
 
         /// <summary>
-        /// 把若干小图按 placement 合成到一张 size×size 的大图（顶部为坐标原点）。
-        /// 返回包含大图与每帧位置的结果。
+        /// 把若干小图按 placement 合成到 size×size 大图（左上为原点）。返回结果。
         /// </summary>
         private static AtlasResult Composite(int size, List<Placement> placements)
         {
@@ -287,7 +278,7 @@ namespace KFramework.Editor.Atlas
             foreach (var p in placements)
             {
                 Color32[] pixels = p.entry.texture.GetPixels32();
-                // Unity 纹理原点在左下，把小图放到 atlas 中对应区域
+                // Unity 纹理原点在左下，放到 atlas 对应区域（留出 Padding 偏移）
                 int dstX = p.x;
                 int dstY = size - p.y - p.h;
                 atlas.SetPixels32(dstX, dstY, p.w, p.h, pixels);
@@ -343,8 +334,8 @@ namespace KFramework.Editor.Atlas
                     meta = MakeMeta(imageName, texW, texH)
                 };
 
-            // 通过 JsonTool（Newtonsoft.Json）序列化
-            string json = JsonTool.ToJson(data);
+            // 通过 KFramework 的 JsonTool（Newtonsoft.Json）序列化
+            string json = global::JsonTool.ToJson(data);
             File.WriteAllText(jsonPath, json, System.Text.Encoding.UTF8);
             Debug.Log("[KAtlasPacker] 已写入 json: " + jsonPath);
         }
@@ -389,14 +380,14 @@ namespace KFramework.Editor.Atlas
         }
 
         [JsonObject(MemberSerialization.OptIn)]
-        private class KAtlasDataHash
+        public class KAtlasDataHash
         {
             [JsonProperty("frames")] public Dictionary<string, KAtlasFrame> frames;
             [JsonProperty("meta")] public KAtlasMeta meta;
         }
 
         [JsonObject(MemberSerialization.OptIn)]
-        private class KAtlasDataArray
+        public class KAtlasDataArray
         {
             [JsonProperty("frames")] public List<KAtlasFrame> frames;
             [JsonProperty("meta")] public KAtlasMeta meta;
@@ -438,7 +429,7 @@ namespace KFramework.Editor.Atlas
         }
 
         [JsonObject(MemberSerialization.OptIn)]
-        private class KAtlasMeta
+        public class KAtlasMeta
         {
             [JsonProperty("app")] public string app;
             [JsonProperty("version")] public string version;
@@ -446,130 +437,6 @@ namespace KFramework.Editor.Atlas
             [JsonProperty("format")] public string format;
             [JsonProperty("size")] public KSize size;
             [JsonProperty("scale")] public string scale;
-        }
-
-        #endregion
-
-        #region MaxRects 装箱算法（Best Short Side Fit）
-
-        /// <summary>
-        /// 经典 MaxRects 矩形装箱（BSSF：最适短边优先）。坐标以左上为原点。
-        /// </summary>
-        private class MaxRectsPacker
-        {
-            private readonly int _binW;
-            private readonly int _binH;
-            private readonly List<IRect> _free = new List<IRect>();
-            private readonly List<IRect> _used = new List<IRect>();
-
-            public MaxRectsPacker(int w, int h)
-            {
-                _binW = w;
-                _binH = h;
-                _free.Add(new IRect { x = 0, y = 0, w = w, h = h });
-            }
-
-            public bool Insert(int w, int h, out IRect placed)
-            {
-                placed = default;
-                int bestIndex = -1;
-                int bestShort = int.MaxValue;
-                int bestLong = int.MaxValue;
-
-                for (int i = 0; i < _free.Count; i++)
-                {
-                    var f = _free[i];
-                    if (f.w >= w && f.h >= h)
-                    {
-                        int leftoverH = f.w - w;
-                        int leftoverV = f.h - h;
-                        int shortFit = System.Math.Min(leftoverH, leftoverV);
-                        int longFit = System.Math.Max(leftoverH, leftoverV);
-                        if (shortFit < bestShort || (shortFit == bestShort && longFit < bestLong))
-                        {
-                            bestShort = shortFit;
-                            bestLong = longFit;
-                            bestIndex = i;
-                        }
-                    }
-                }
-
-                if (bestIndex < 0) return false;
-
-                var chosen = _free[bestIndex];
-                placed = new IRect { x = chosen.x, y = chosen.y, w = w, h = h };
-                _used.Add(placed);
-                SplitFreeRect(placed);
-                PruneFreeRects();
-                return true;
-            }
-
-            private void SplitFreeRect(IRect usedNode)
-            {
-                for (int i = _free.Count - 1; i >= 0; i--)
-                {
-                    var f = _free[i];
-                    if (!Overlaps(f, usedNode)) continue;
-
-                    _free.RemoveAt(i);
-
-                    // 水平方向切分
-                    if (usedNode.x < f.x + f.w && usedNode.x + usedNode.w > f.x)
-                    {
-                        if (usedNode.y > f.y && usedNode.y < f.y + f.h)
-                            _free.Add(new IRect { x = f.x, y = f.y, w = f.w, h = usedNode.y - f.y });
-                        if (usedNode.y + usedNode.h < f.y + f.h)
-                            _free.Add(new IRect { x = f.x, y = usedNode.y + usedNode.h, w = f.w, h = f.y + f.h - (usedNode.y + usedNode.h) });
-                    }
-
-                    // 垂直方向切分
-                    if (usedNode.y < f.y + f.h && usedNode.y + usedNode.h > f.y)
-                    {
-                        if (usedNode.x > f.x && usedNode.x < f.x + f.w)
-                            _free.Add(new IRect { x = f.x, y = f.y, w = usedNode.x - f.x, h = f.h });
-                        if (usedNode.x + usedNode.w < f.x + f.w)
-                            _free.Add(new IRect { x = usedNode.x + usedNode.w, y = f.y, w = f.x + f.w - (usedNode.x + usedNode.w), h = f.h });
-                    }
-                }
-            }
-
-            private void PruneFreeRects()
-            {
-                for (int i = _free.Count - 1; i >= 0; i--)
-                {
-                    for (int j = i - 1; j >= 0; j--)
-                    {
-                        if (Contains(_free[j], _free[i]))
-                        {
-                            _free.RemoveAt(i);
-                            break;
-                        }
-                        if (Contains(_free[i], _free[j]))
-                        {
-                            _free.RemoveAt(j);
-                            if (j < i) i--;
-                        }
-                    }
-                }
-            }
-
-            private static bool Overlaps(IRect a, IRect b)
-            {
-                return a.x < b.x + b.w && a.x + a.w > b.x &&
-                       a.y < b.y + b.h && a.y + a.h > b.y;
-            }
-
-            private static bool Contains(IRect outer, IRect inner)
-            {
-                return inner.x >= outer.x && inner.y >= outer.y &&
-                       inner.x + inner.w <= outer.x + outer.w &&
-                       inner.y + inner.h <= outer.y + outer.h;
-            }
-
-            public struct IRect
-            {
-                public int x, y, w, h;
-            }
         }
 
         #endregion
