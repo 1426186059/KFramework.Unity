@@ -84,19 +84,7 @@ namespace FC.Editor.Tools
                 int texW = texture.width;
                 int texH = texture.height;
 
-                // sprite.rect 定义在源图分辨率上；若导入时被 Max Size 等缩放，
-                // 需按比例换算到当前纹理分辨率，否则坐标越界或错位。
-                // 从文件头读取源图真实尺寸（支持 PNG / GIF）。
-                int srcW = texW, srcH = texH;
-                if (TryGetSourceSize(texturePath, out int sW, out int sH) && sW > 0 && sH > 0)
-                {
-                    srcW = sW;
-                    srcH = sH;
-                }
-                float scaleX = (float)texW / srcW;
-                float scaleY = (float)texH / srcH;
-
-                var sprites = AssetDatabase.LoadAllAssetsAtPath(texturePath)
+                Sprite[] sprites = AssetDatabase.LoadAllAssetsAtPath(texturePath)
                     .OfType<Sprite>()
                     .OrderBy(s => s.name)
                     .ToArray();
@@ -116,24 +104,16 @@ namespace FC.Editor.Tools
                 int ok = 0;
                 foreach (var sprite in sprites)
                 {
-                    // sprite.rect 为源图像素坐标（左上原点），按导入缩放换算，
-                    // 再转为 Texture2D.GetPixels 的左下原点坐标。
                     Rect r = sprite.rect;
-                    float sx = r.x * scaleX;
-                    float syTop = r.y * scaleY;
-                    float sw = r.width * scaleX;
-                    float sh = r.height * scaleY;
+                    float sx = r.x;
+                    float syTop = r.y;
+                    float sw = r.width;
+                    float sh = r.height;
 
-                    int bx = Mathf.Clamp(Mathf.RoundToInt(sx), 0, texW);
-                    int rightX = Mathf.Clamp(Mathf.RoundToInt(sx + sw), 0, texW);
-                    int byBottom = Mathf.Clamp(Mathf.RoundToInt(texH - (syTop + sh)), 0, texH);
-                    int topBottom = Mathf.Clamp(Mathf.RoundToInt(texH - syTop), 0, texH);
-                    int w = rightX - bx;
-                    int h = topBottom - byBottom;
-                    if (w <= 0 || h <= 0) continue;
+                    if (sw <= 0 || sh <= 0) continue;
 
-                    Color[] pixels = texture.GetPixels(bx, byBottom, w, h);
-                    var crop = new Texture2D(w, h, TextureFormat.RGBA32, false);
+                    Color[] pixels = texture.GetPixels(Mathf.RoundToInt(r.x), Mathf.RoundToInt(r.y), Mathf.RoundToInt(sw), Mathf.RoundToInt(sh));
+                    var crop = new Texture2D(Mathf.RoundToInt(sw), Mathf.RoundToInt(sh), TextureFormat.RGBA32, false);
                     crop.SetPixels(pixels);
                     crop.Apply();
 
@@ -155,41 +135,6 @@ namespace FC.Editor.Tools
                     importer.SaveAndReimport();
                 }
             }
-        }
-
-        /// <summary>
-        /// 从图片文件头读取源图尺寸（支持 PNG / GIF），用于校正导入缩放。
-        /// 读取失败或格式不支持时返回 false。
-        /// </summary>
-        private static bool TryGetSourceSize(string path, out int width, out int height)
-        {
-            width = height = -1;
-            try
-            {
-                byte[] data = File.ReadAllBytes(path);
-                if (data.Length < 24) return false;
-
-                // PNG: 签名 89 50 4E 47，宽/高位于偏移 16 / 20（大端）
-                if (data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47)
-                {
-                    width = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19];
-                    height = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | data[23];
-                    return true;
-                }
-
-                // GIF: 签名 "GIF"，宽/高位于偏移 6 / 8（小端）
-                if (data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46)
-                {
-                    width = data[6] | (data[7] << 8);
-                    height = data[8] | (data[9] << 8);
-                    return true;
-                }
-            }
-            catch
-            {
-                // 忽略异常，交给调用方回退到导入尺寸
-            }
-            return false;
         }
     }
 }
