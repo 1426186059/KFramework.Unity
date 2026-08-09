@@ -97,9 +97,9 @@ namespace FC.Editor.Tools
 
                 // 统一输出到工程根目录/AAA/Temp
                 string projectRoot = Directory.GetParent(Application.dataPath).FullName;
-                string dir = Path.Combine(projectRoot, "AAA", "Temp");
+                string textureDir = Path.GetFileNameWithoutExtension(texturePath);
+                string dir = Path.Combine(projectRoot, "AAA/Atlas/", textureDir);
                 Directory.CreateDirectory(dir);
-                string baseName = Path.GetFileNameWithoutExtension(texturePath);
 
                 int ok = 0;
                 foreach (var sprite in sprites)
@@ -117,13 +117,14 @@ namespace FC.Editor.Tools
                     crop.SetPixels(pixels);
                     crop.Apply();
 
-                    string outPath = Path.Combine(dir, baseName + "_" + sprite.name + ".png");
+                    string outPath = Path.Combine(dir, sprite.name + ".png");
                     File.WriteAllBytes(outPath, crop.EncodeToPNG());
                     Object.DestroyImmediate(crop);
                     ok++;
                 }
 
-                Debug.Log("[SpriteSplitter] 已从 " + texturePath + " 拆分出 " + ok + " 张小图。");
+                Debug.Log("[SpriteSplitter] 已从 " + texturePath + " 拆分出 " + ok + " 张小图");
+                Debug.Log("输出目录: " + dir);
                 return ok > 0;
             }
             finally
