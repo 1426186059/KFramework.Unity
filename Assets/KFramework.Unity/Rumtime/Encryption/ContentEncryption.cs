@@ -1,6 +1,7 @@
 using System;
 using System.Text;
 
+//速度最快,包体较小
 public static class ContentEncryption
 {
     // 固定混淆密钥（随包发布，知道即可逆向，仅防一般用户）
